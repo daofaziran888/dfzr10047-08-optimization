@@ -27,6 +27,53 @@ class ReparseTaskService(BaseModuleService):
                 return row
         return None
 
+    def run_action(self, entry_id: int, action: str, payload: Any | None = None):
+        """重解析单上的领取和继续核验入口与解析批次共用同一份回执。"""
+        task = store.find(self.MODULE, entry_id)
+        if task is None:
+            return None, f"{self.ENTITY} {entry_id} 不存在或已归档"
+
+        values = getattr(payload, "values", None) or {}
+        owner = str(
+            values.get("owner")
+            or values.get("领取人")
+            or getattr(payload, "remark", None)
+            or "reparse-owner"
+        )
+        task_no = str(task.get("重解析编号") or "")
+
+        if action in ("领取任务", "领取原范围"):
+            from app.services.correction_flow import CorrectionFlowService
+            batch_no = str(task.get("关联批次") or task.get("范围批次") or "")
+            ok, message, claimed = CorrectionFlowService().claim_original_scope(
+                batch_no, owner=owner, task_no=task_no)
+            if not ok:
+                return None, message
+            return claimed or store.find(self.MODULE, entry_id), message
+
+        if action == "继续核验":
+            from app.services.correction_flow import CorrectionFlowService
+            ok, message, receipt = CorrectionFlowService().verify_receipt({
+                "task_no": task_no,
+                "receipt_no": values.get("receipt_no") or values.get("回执编号"),
+            })
+            return (receipt if ok else None), message
+
+        # 与更正回执关联的任务走真实完成逻辑，确保覆盖策略和结论落库；
+        # 普通 seed 任务仍保留通用动作行为，避免影响既有列表操作。
+        if action == "确认完成" and (task.get("关联更正回执") or task.get("原驳回样本")):
+            count_text = str(values.get("reparsed_count") or task.get("受影响投递数") or "1")
+            count = int(count_text) if count_text.isdigit() else 1
+            conclusion = str(
+                values.get("conclusion")
+                or values.get("重解析结论")
+                or "按更正复核结论与原驳回凭据完成重解析"
+            )
+            ok, message, updated = self.complete_task(task_no, count, conclusion)
+            return (updated if ok else None), message
+
+        return super().run_action(entry_id, action, payload)
+
     def plan_position_range(self, task_no: str, reason: str,
                             coverage_strategy: str, affected_batches: list[str],
                             batch_positions: dict[str, str]) -> tuple[bool, str, dict[str, Any] | None]:

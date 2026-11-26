@@ -5,7 +5,8 @@ export type EntryRow = {
   status: string
   pending: boolean
   abnormal: boolean
-  [field: string]: string | number | boolean
+  // 协调回执允许携带时间线、快照等嵌套结构，模板和接口层按 unknown 收窄。
+  [field: string]: unknown
 }
 
 export type ModuleMeta = {

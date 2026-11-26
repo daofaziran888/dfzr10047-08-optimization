@@ -129,6 +129,47 @@ class ParseBatchService(BaseModuleService):
         batch["作废原因"] = reason
         return True, f"批次 {intake_batch} 已作废：{reason}"
 
+    def run_action(self, entry_id: int, action: str, payload: Any | None = None):
+        """解析批次页的领取/更正动作必须进入协调服务，不能只改通用状态。"""
+        row = store.find(self.MODULE, entry_id)
+        if row is None:
+            return None, f"{self.ENTITY} {entry_id} 不存在或已归档"
+
+        values = getattr(payload, "values", None) or {}
+        owner = str(
+            values.get("owner")
+            or values.get("领取人")
+            or getattr(payload, "remark", None)
+            or "batch-duty"
+        )
+
+        if action == "领取原范围":
+            from app.services.correction_flow import CorrectionFlowService
+            ok, message, _task = CorrectionFlowService().claim_original_scope(
+                str(row.get("批次记录编号")), owner=owner)
+            return (row if ok else None), message
+
+        if action == "更正原值":
+            # 打开表单是前端交互；直接调 API 时返回明确提示，避免把“打开表单”误当成状态流转。
+            return row, "请在更正表单中录入修订样本并提交，服务端将核对原批与接手任务"
+
+        if action in ("提交更正", "提交更正复核", "确认更正", "重复提交更正"):
+            from app.services.correction_flow import CorrectionFlowService
+            data = dict(values)
+            data.setdefault("batch_no", row.get("批次记录编号"))
+            data.setdefault("idempotency_key", values.get("idempotency_key") or getattr(payload, "remark", None))
+            ok, message, receipt = CorrectionFlowService().submit_correction(data)
+            return (receipt if ok else None), message
+
+        if action in ("继续放行核验", "完成版本校验", "确认放行"):
+            from app.services.correction_flow import CorrectionFlowService
+            data = dict(values)
+            data.setdefault("receipt_no", row.get("更正受理回执"))
+            ok, message, receipt = CorrectionFlowService().verify_receipt(data)
+            return (receipt if ok else None), message
+
+        return super().run_action(entry_id, action, payload)
+
     def open_batches(self) -> list[dict[str, Any]]:
         """列出全部未闭合批次，供水位推进前置校验消费。"""
         return [

@@ -19,6 +19,21 @@ class ResultDeliverService(BaseModuleService):
 
     MAX_RETRIES = 3
 
+    def run_action(self, entry_id: int, action: str, payload: Any | None = None):
+        """发布入口的“领取可交付批次”必须校验更正回执和唯一候选版本。"""
+        if action in ("领取可交付批次", "领取交付批次", "发布领取"):
+            from app.services.correction_flow import CorrectionFlowService
+            values = getattr(payload, "values", None) or {}
+            data = dict(values)
+            if not data.get("receipt_no") and not data.get("batch_no"):
+                row = store.find(self.MODULE, entry_id)
+                if row and row.get("更正受理回执"):
+                    data["receipt_no"] = row["更正受理回执"]
+            ok, message, result = CorrectionFlowService().claim_deliverable(data)
+            entry = result.get("receipt") if isinstance(result, dict) else result
+            return (entry if ok else None), message
+        return super().run_action(entry_id, action, payload)
+
     def _find(self, deliver_no: str) -> dict[str, Any] | None:
         for row in store.rows(self.MODULE):
             if row.get("投递记录编号") == deliver_no:
